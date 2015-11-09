@@ -1,491 +1,651 @@
-define('nifty', function(ele) {
+/**
+ * nifty.js
+ * A nifty rich text editor powered by a purely functional data model.
+ */
 
-  /**
-    Class: Interval
-    Represents a range of text.
-   */
+ // Predef
 
-  function Interval(lo, hi) {
-    if(!(this instanceof Interval))
-      return new Interval(lo, hi)
-    if(lo === undefined || hi === undefined || lo > hi)
-      throw new Error("Invalid interval specified")
-    this.lo = lo
-    this.hi = hi
-  }
+var CHAR_STYLES = ['b','i','u','sup','sub']
+var PARA_STYLES = ['l','r','c']
 
-  Interval.prototype.empty = function() {
-    return this.lo === this.hi
-  }
-
-  Interval.prototype.length = function() {
-    return this.hi - this.lo
-  }
-
-  Interval.prototype.expand = function(amt) {
-    return new Interval(this.lo, this.hi + amt)
-  }
-
-  Interval.prototype.shrink = function(amt) {
-    return this.hi - amt > 0 ?
-      this.expand(-amt) : new Interval(this.lo, this.lo)
-  }
-
-  Interval.prototype.shift = function(amt) {
-    return new Interval(this.lo + amt, this.hi + amt)
-  }
-
-  Interval.prototype.incl = function(that) {
-    if(that instanceof Interval)
-      return this.incl(that.lo) && this.incl(that.hi)
-    else
-      return this.lo <= that && this.hi >= that
-  }
-
-  Interval.prototype.below = function(that) {
-    if(that instanceof Interval)
-      return this.hi < that.lo
-    else
-      return this.hi < that
-  }
-
-  Interval.prototype.above = function(that) {
-    if(that instanceof Interval)
-      return this.lo > that.hi
-    else
-      return this.lo > that
-  }
-
-  Interval.prototype.intersects = function(that) {
-    return this.incl(that.lo) || this.incl(that.hi)
-  }
-
-  Interval.prototype.equals = function(that) {
-    return this.lo === that.lo && this.hi === that.hi
-  }
-
-  Interval.prototype.fullIntv = function(that) {
-    return new Interval(Math.min(this.lo, that.lo),
-      Math.max(this.hi, that.hi))
-  }
-
-  Interval.prototype.loIntv = function(that) {
-    return new Interval(Math.min(this.lo, that.lo),
-      Math.max(Math.min(this.hi, that.lo),
-        Math.min(this.lo, that.hi)))
-  }
-
-  Interval.prototype.hiIntv = function(that) {
-    return new Interval(Math.min(Math.max(this.hi, that.lo),
-        Math.max(this.lo, that.hi)),
-      Math.max(this.hi, that.hi))
-  }
-
-  Interval.prototype.limit = function(that) {
-    return new Interval(Math.max(this.lo, that.lo),
-      Math.min(this.hi, that.hi))
-  }
-
-  Interval.prototype.serialize = function() {
-    return [this.lo, this.hi]
-  }
-
-  Interval.unserialize = function(serialized) {
-    return new Interval(serialized[0], serialized[1])
-  }
+var inherits = function(child, parent) {
+  child.prototype = Object.create(parent.prototype)
+  child.prototype.constructor = child
+  child.super_ = parent
+}
 
 
 
-  /**
-    Class: IntervalList
-    Specifies a list of formatting Intervals.
-   */
+// Caret model
 
-  function IntervalList(intv, tail) {
-    if(!(this instanceof IntervalList))
-      return new IntervalList(intv, tail)
-    if(!(intv instanceof Interval))
-      return new EmptyList()
-    if(intv.empty())
-      if(tail)
-        return new IntervalList(tail.intv, tail.tail)
-      else
-        return new EmptyList()
-    
-    this.intv = intv
-    this.tail = tail || new EmptyList()
-    this.empty = false
-  }
+/**
+ * Base case representing an absence of Carets.
+ */
 
-  function EmptyList() {
-    this.empty = true
-  }
-  EmptyList.prototype = Object.create(IntervalList.prototype)
-  EmptyList.prototype.constructor = EmptyList
+function Caretless() {}
+Caretless.prototype.shift = function() { return this }
+Caretless.prototype.put = function(off, uid) { return new Caret(off, uid, this) }
+Caretless.prototype.rem = function() { return this }
+Caretless.prototype.find = function() { return null }
+Caretless.prototype.ins = function() { return this }
+Caretless.prototype.del = function() { return this }
+Caretless.prototype.split = function() { return this }
+Caretless.prototype.truncate = function() { return this }
+Caretless.prototype.render = function() { }
+Caretless.prototype.dom = function() { return null }
 
-  IntervalList.prototype.length = function(offset) {
-    var o = offset || 0
-    if(this.tail.empty)
-      return o
-    else
-      return this.tail.length(o + 1)
-  }
+/**
+ * Represents a sequence of editing Carets.
+ */
 
-  IntervalList.prototype.intersects = function(idx) {
-    if(this.empty)
-      return false
-    else if(this.intv.incl(idx))
-      return true
-    else
-      return this.tail.intersects(idx)
-  }
+function Caret(off, uid, next) {
+  this.off = off
+  this.uid = uid
+  this.next = next
+  this.style = 'ni-ele ni-ele-c ni-ele-uid-' + this.uid
+}
 
-  IntervalList.prototype.shift = function(amt) {
-    if(this.empty)
-      return this
-    else
-      return new IntervalList(this.intv.shift(amt),
-        this.tail.shift(amt))
-  }
+Caret.prototype.shift = function(off) {
+  return new Caret(this.off + off, this.uid, this.next)
+}
 
-  IntervalList.prototype.ins = function(len, idx) {
-    if(this.empty)
-      return this
-    else if(this.intv.below(idx))
-      return new IntervalList(this.intv,
-        this.tail.ins(len, idx))
-    else if(this.intv.above(idx))
-      return this.shift(len)
-    else
-      return new IntervalList(this.intv.expand(len),
-        this.tail.shift(len))
-  }
+Caret.prototype.put = function(pos, uid) {
+  if(pos < this.off)
+    return new Caret(pos, uid, new Caret(this.off - pos, this.uid, this.next))
+  else
+    return new Caret(this.off, this.uid, this.next.put(pos - this.off, uid))
+}
 
-  IntervalList.prototype.del = function(len, idx) {
-    var i = new Interval(idx, idx + len)
-    if(this.empty || len === 0)
-      return this
-    else if(this.intv.below(i))
-      return new IntervalList(this.intv,
-        this.tail.del(len, idx))
-    else if(this.intv.above(i))
-      return this.shift(-len)
-    else if(this.intv.incl(i))
-      return new IntervalList(this.intv.shrink(len),
-        this.tail.shift(-len))
-    else if(this.intv.incl(i.hi))
-      return new IntervalList(new Interval(idx, this.intv.hi - len),
-        this.tail.shift(-len))
-    else if(this.intv.incl(i.lo))
-      return this.tail.del(len, idx).app(new Interval(this.intv.lo, idx))
-    else
-      return this.tail.del(len, idx)
-  }
+Caret.prototype.rem = function(uid) {
+  if(uid === this.uid)
+    return this.next.shift(this.off)
+  else
+    return new Caret(this.off, this.uid, this.next.rem(uid))
+}
 
-  IntervalList.prototype.app = function(i) {
-    if(i.empty())
-      return this
-    else if(this.empty)
-      return new IntervalList(i)
-    else if(this.intv.below(i))
-      return new IntervalList(this.intv,
-        this.tail.app(i))
-    else if(this.intv.above(i))
-      return new IntervalList(i, this)
-    else if(this.intv.incl(i))
-      return new IntervalList(this.intv.loIntv(i),
-        new IntervalList(this.intv.hiIntv(i), this.tail))
-    else
-      return this.tail.app(this.intv.fullIntv(i))
-  }
+Caret.prototype.find = function(off, uid) {
+  if(uid === this.uid)
+    return off + this.off
+  else
+    return this.next.find(off + this.off, uid)
+}
 
-  IntervalList.prototype.window = function(i) {
-    if(this.empty)
-      return this
-    else if(i.incl(this.intv))
-      return new IntervalList(this.intv, this.tail.window(i))
-    else if(this.intv.intersects(i))
-      return new IntervalList(this.intv.limit(i), this.tail.window(i))
-    else
-      return this.tail.window(i)
-  }
+Caret.prototype.ins = function(pos, txt) {
+  if(pos < this.off)
+    return this.shift(txt.length)
+  else
+    return new Caret(this.off, this.uid, this.next.ins(pos - this.off, txt))
+}
 
-  IntervalList.prototype.serialize = function() {
-    if(this.empty)
-      return []
-    return [this.intv.serialize()].concat(this.tail.serialize())
-  }
+Caret.prototype.del = function(pos, len) {
+  if(pos + len <= this.off)
+    return this.shift(-len)
+  else if(pos < this.off)
+    return new Caret(pos, this.uid, this.next.del(0, len - (this.off - pos)))
+  else
+    return new Caret(this.off, this.uid, this.next.del(pos - this.off, len))
+}
 
-  IntervalList.gen = function() {
-    if(!arguments.length)
-      return new EmptyList()
-    return [].slice.call(arguments).reduce(
-      function(ilist, i) {
-        return ilist.app(i)
-      }, new IntervalList())
-  }
+Caret.prototype.split = function(pos) {
+  return this.ins(pos, ' ')
+}
 
-  IntervalList.unserialize = function(serialized) {
-    if(!serialized)
-      return new EmptyList()
-    return IntervalList.gen.apply(null, serialized.map(function(i) {
-      return Interval.unserialize(i)
-    }))
-  }
+Caret.prototype.truncate = function(pos) {
+  if(pos <= this.off)
+    return new Caret(this.off - pos, this.uid, this.next)
+  else
+    return this.next.truncate(pos - this.off)
+}
 
-
-
-  /**
-    Class: Text
-    Contains the model data representing the rich text.
-   */
-
-  function Text(t, bold, italic) {
-    if(!(this instanceof Text))
-      return new Text(t, bold, italic)
-    this.t = t || ''
-    this.bold = bold ? bold.window(Interval(0, t.length)) :
-      new IntervalList()
-    this.italic = italic ? italic.window(Interval(0, t.length)) :
-      new IntervalList()
-  }
-
-  Text.prototype.ins = function(str, idx) {
-    return new Text(this.t.substr(0,idx) + str + this.t.substr(idx),
-      this.bold.ins(str.length, idx),
-      this.italic.ins(str.length, idx))
-  }
-
-  Text.prototype.del = function(len, idx) {
-    return new Text(this.t.substr(0,idx) + this.t.substr(idx + len),
-      this.bold.del(len, idx),
-      this.italic.del(len, idx))
-  }
-
-  Text.prototype.length = function() {
-    return this.t.length
-  }
-
-  Text.prototype.format = function(type, intv) {
-    switch(type) {
-      case 'bold':
-      case 'embolden':
-        return this.embolden(intv)
-        break
-      case 'italic':
-      case 'italicize':
-        return this.italicize(intv)
-        break
-      default:
-        throw new Error(type + " is not a valid formatting option")
+Caret.prototype.render = function(mount, until) {
+  if(this.off <= until) {
+    if(mount.nodeType === 3) {
+      var sibling = mount.splitText(this.off)
+      mount.parentNode.insertBefore(this.dom(), sibling)
+      this.next.render(sibling, until - this.off)
+    } else {
+      mount.appendChild(this.dom())
+      this.next.render(mount, until - this.off)
     }
   }
+}
 
-  Text.prototype.embolden = function(intv) {
-    return new Text(this.t, this.bold.app(intv), this.italic)
+Caret.prototype.dom = function() {
+  var dom = document.createElement('div')
+  dom.setAttribute('class', 'ni-cursor')
+  dom.niNode = this
+  return dom
+}
+
+
+
+// Text model
+
+/**
+ * Format represents a set of styles to be applied to a given text block.
+ */
+
+function Format(valid, style) {
+  this.valid = valid
+  this.style = this.valid.filter(function(val) {
+    return style.indexOf(val) > -1
+  })
+
+  this.html = this.style.length ?
+    'ni-' + this.style.join(' ni-') : ''
+}
+
+Format.prototype.eq = function(that) {
+  return this.html === that.html && this.valid === that.valid
+}
+
+Format.prototype.add = function(that) {
+  return new Format(this.valid, this.style.concat(that.style))
+}
+
+Format.prototype.sub = function(that) {
+  return new Format(this.valid, this.style.filter(function(tag) {
+    return that.style.indexOf(tag) < 0
+  }))
+}
+
+/**
+ * CharFormat wraps formats that apply on a per-Interval basis.
+ */
+
+function CharFormat(conf) { return new Format(CHAR_STYLES, conf || []) }
+
+/**
+ * ParaFormat wraps formats that apply on a per-Paragraph basis.
+ */
+
+function ParaFormat(conf) { return new Format(PARA_STYLES, conf || []) }
+
+
+
+/**
+ * Abstract class representing a node of the text tree.
+ */
+
+function Node() {}
+
+Node.prototype.inc = function(pos) {
+  return pos >= 0 && pos <= this.len
+}
+
+Node.prototype.sect = function(pos, len) {
+  return pos < this.len && pos + len > 0
+}
+
+Node.prototype.inside = function(pos, len) {
+  return pos <= 0 && pos + len >= this.len
+}
+
+Node.prototype.render = function(mount, carets, offset) {
+  if(mount.niNode !== this) {
+    if(mount.niNode && mount.niNode.ele === this.ele) {
+      mount.niNode = this
+      this.upd(mount, carets, offset)
+    } else {
+      mount.parentNode.replaceChild(this.dom(carets, offset), mount)
+    }
+  }
+  return this
+}
+
+Node.prototype.domFragment = function() {
+  var dom = document.createElement('div')
+  dom.setAttribute('class', this.style)
+  dom.niNode = this
+  return dom
+}
+
+
+
+/** 
+ * Abstract class representing a leaf node of the text tree.
+ */
+
+function Leaf() {
+  Leaf.super_.call(this)
+
+  this.leaf = true
+  this.size = 1
+
+  this.leftmost = this
+  this.rightmost = this
+}
+
+inherits(Leaf, Node)
+
+
+
+/**
+ * Abstract class representing a branch node of the text tree.
+ */
+
+function Branch(left, right) {
+  Branch.super_.call(this)
+
+  // If the tree is growing lopsided, rebalance it.
+  if(right.size / 2 > left.size) {
+    this.left = new this.constructor(left, right.left)
+    this.right = right.right
+  } else if(left.size / 2 > right.size) {
+    this.left = left.left
+    this.right = new this.constructor(left.right, right)
+  } else {
+    this.left = left
+    this.right = right
   }
 
-  Text.prototype.italicize = function(intv) {
-    return new Text(this.t, this.bold, this.italic.app(intv))
-  }
+  // Hoist up a direct reference to the left/rightmost descendant nodes.
+  this.leftmost = this.left.leaf ? this.left : this.left.leftmost
+  this.rightmost = this.right.leaf ? this.right : this.right.rightmost
 
-  Text.prototype.toHTML = function() {
-    var b = makeObj(this.bold, 'b')
-    var i = makeObj(this.italic, 'i')
-    var x = [].concat(b,i).sort(function(a,b) {
-      return a.idx - b.idx
-    })
+  this.leaf = false
+  this.size = this.left.size + this.right.size
+  this.len = this.left.len + this.right.len
+  this.mid = this.left.len
+}
 
-    if(!x.length)
-      return this.t
-    return x.reduce(function(gen, i, idx, arr) {
-      gen.html += gen.text.slice(gen.offset, i.idx)
-      if(i.start) {
-        gen.states.unshift(i.val)
-        gen.html += makeTag(i.val, true)
-      } else {
-        var x = []
-        while(gen.states[0] != i.val) {
-          x.unshift(gen.states.shift())
-          gen.html += makeTag(x[0], false)
-        }
-        gen.html += makeTag(gen.states.shift(), false)
-        while(x.length) {
-          gen.states.unshift(x.shift())
-          gen.html += makeTag(gen.states[0], true)
-        }
-      }
-      gen.offset = i.idx
-      if(idx === arr.length - 1)
-        return gen.html + gen.text.slice(i.idx)
-      return gen
-    }, {
-      states: [],
-      html: '',
-      text: this.t,
-      offset: 0
-    }).replace(/\n(<\/.>)*$/, '$1\n\r')
-  }
+inherits(Branch, Node)
 
-  function makeObj(intvl, tag) {
-    return intvl.serialize().reduce(function(gen, i) {
-      gen.push({idx: i[0], start:true, val:tag},
-        {idx:i[1], start: false, val:tag})
-      return gen
-    }, [])
-  }
+Branch.prototype.merge = function() {
+  if(this.right.leaf)
+    return this.left.concat(this.right)
+  return new this.constructor(this.left.concat(this.right.leftmost),
+    this.right.unshift())
+}
 
-  function makeTag(name, open) {
-    if(open)
-      return '<' + name + '>'
+Branch.prototype.concat = function(that) {
+  return new this.constructor(this.left, this.right.concat(that))
+}
+
+Branch.prototype.unshift = function() {
+  if(this.left.leaf)
+    return this.right
+  else
+    return new this.constructor(this.left.unshift(), this.right)
+}
+
+Branch.prototype.dom = function(carets, offset) {
+  var dom = this.domFragment()
+  dom.appendChild(this.left.dom(carets, offset))
+  dom.appendChild(this.right.dom(carets, offset + this.left.len))
+  return dom
+}
+
+Branch.prototype.upd = function(mount, carets, offset) {
+  this.left.render(mount.children[0], carets, offset)
+  this.right.render(mount.children[1], carets, offset + this.left.len)
+}
+
+
+
+/**
+ * Represents a basic interval of formatted text.
+ */
+
+function Interval(txt, fmt) {
+  Interval.super_.call(this)
+
+  this.txt = txt || ''
+  this.fmt = fmt || new CharFormat
+  this.len = this.txt.length
+  this.ele = 'i'
+  this.style = 'ni-ele ni-ele-i ' + this.fmt.html
+}
+
+inherits(Interval, Leaf)
+
+Interval.prototype.ins = function(pos, txt) {
+  if(this.inc(pos))
+    return new Interval(
+      this.txt.slice(0, pos) + txt + this.txt.slice(pos),
+      this.fmt
+    )
+  else
+    return this
+}
+
+Interval.prototype.del = function(pos, len) {
+  if(this.sect(pos, len))
+    return new Interval(
+      this.txt.slice(0, Math.max(0, pos)) + this.txt.slice(pos + len),
+      this.fmt
+    )
+  else
+    return this
+}
+
+Interval.prototype.app = function(pos, len, fmt) {
+  if(this.inside(pos, len))
+    return new Interval(this.txt, fmt)
+  else if(this.sect(pos, len))
+    return this.split(pos + len, fmt).split(pos, this.fmt)
+  else
+    return this
+}
+
+Interval.prototype.add = function(pos, len, fmt) {
+  return this.app(pos, len, this.fmt.add(fmt))
+}
+
+Interval.prototype.sub = function(pos, len, fmt) {
+  return this.app(pos, len, this.fmt.sub(fmt))
+}
+
+Interval.prototype.split = function(pos, fmt) {
+  if(pos <= 0)
+    return this
+  else if(pos >= this.len)
+    return new Interval(this.txt, fmt)
+  else
+    return new IntervalTree(
+      new Interval(this.txt.slice(0, pos), fmt),
+      new Interval(this.txt.slice(pos), this.fmt)
+    )
+}
+
+Interval.prototype.concat = function(that) {
+  return new Interval(this.txt + that.txt, this.fmt)
+}
+
+Interval.prototype.dom = function(carets, offset) {
+  var dom = this.domFragment()
+  dom.textContent = this.txt
+  carets.truncate(offset).render(dom.firstChild || dom, this.len)
+  return dom
+}
+
+Interval.prototype.upd = function(mount, carets, offset) {
+  mount.setAttribute('class', this.style)
+  mount.textContent = this.txt
+  carets.truncate(offset).render(mount.firstChild || mount, this.len)
+}
+
+
+
+/**
+ * Represents an ordered set of Intervals.
+ */
+
+function IntervalTree(left, right) {
+  IntervalTree.super_.call(this, left, right)
+
+  // Neighboring intervals should always have distinct Formats.
+  if(left.rightmost.fmt.eq(right.leftmost.fmt))
+    return this.merge()
+
+  this.ele = 'it'
+  this.style = 'ni-ele ni-ele-it'
+}
+
+inherits(IntervalTree, Branch)
+
+IntervalTree.prototype.ins = function(pos, txt) {
+  if(pos === this.mid)
+    return new IntervalTree(this.left.ins(pos, txt), this.right)
+  else if(this.inc(pos))
+    return new IntervalTree(this.left.ins(pos, txt),
+      this.right.ins(pos - this.mid, txt))
+  else
+    return this
+}
+
+IntervalTree.prototype.del = function(pos, len) {
+  if(pos <= this.mid && pos + len >= this.len)
+    return this.left.del(pos, len)
+  else if(pos <= 0 && pos + len >= this.mid)
+    return this.right.del(pos - this.mid, len)
+  else if(this.sect(pos, len))
+    return new IntervalTree(this.left.del(pos, len),
+      this.right.del(pos - this.mid, len))
+  else
+    return this
+}
+
+IntervalTree.prototype.add = function(pos, len, fmt) {
+  if(this.sect(pos, len))
+    return new IntervalTree(this.left.add(pos, len, fmt),
+      this.right.add(pos - this.mid, len, fmt))
+  else
+    return this
+}
+
+IntervalTree.prototype.sub = function(pos, len, fmt) {
+  if(this.sect(pos, len))
+    return new IntervalTree(this.left.sub(pos, len, fmt),
+      this.right.sub(pos - this.mid, len, fmt))
+  else
+    return this
+}
+
+IntervalTree.prototype.split = function(pos, fmt) {
+  if(this.inc(pos))
+    return new IntervalTree(this.left.split(pos, fmt),
+      this.right.split(pos - this.mid, fmt))
+  else
+    return this
+}
+
+
+
+/**
+ * Represents a paragraph of formatted text as the root of a tree.
+ */
+
+function Paragraph(root, fmt) {
+  Paragraph.super_.call(this)
+
+  this.root = root || new Interval
+  this.fmt = fmt || new ParaFormat
+
+  // A paragraph always contains a paragraph break.
+  this.len = this.root.len + 1
+
+  this.ele = 'p'
+  this.style = 'ni-ele ni-ele-p ' + this.fmt.html
+}
+
+inherits(Paragraph, Leaf)
+
+Paragraph.prototype.ins = function(pos, txt) {
+  if(this.inc(pos))
+    return new Paragraph(this.root.ins(pos, txt), this.fmt)
+  else
+    return this
+}
+
+Paragraph.prototype.del = function(pos, len) {
+  if(this.sect(pos, len))
+    return new Paragraph(this.root.del(pos, len), this.fmt)
+  else
+    return this
+}
+
+Paragraph.prototype.add = function(pos, len, fmt) {
+  if(this.sect(pos, len) || pos === 0) {
+    if(fmt.valid === CHAR_STYLES)
+      return new Paragraph(this.root.add(pos, len, fmt), this.fmt)
     else
-      return '</' + name + '>'
+      return new Paragraph(this.root, this.fmt.add(fmt))
+  } else
+    return this
+}
+
+Paragraph.prototype.sub = function(pos, len, fmt) {
+  if(this.sect(pos, len) || pos === 0) {
+    if(fmt.valid === CHAR_STYLES)
+      return new Paragraph(this.root.sub(pos, len, fmt), this.fmt)
+    else
+      return new Paragraph(this.root, this.fmt.sub(fmt))
+  } else
+    return this
+}
+
+Paragraph.prototype.concat = function(that) {
+  return new Paragraph(
+    new IntervalTree(this.root, that.root),
+    this.fmt
+  )
+}
+
+Paragraph.prototype.split = function(pos) {
+  if(this.inc(pos))
+    return new ParagraphTree(
+      this.del(pos, this.len),
+      this.del(0, pos)
+    )
+  else
+    return this
+}
+
+Paragraph.prototype.dom = function(carets, offset) {
+  var dom = this.domFragment()
+  dom.appendChild(this.root.dom(carets.truncate(offset), 0))
+  return dom
+}
+
+Paragraph.prototype.upd = function(mount, carets, offset) {
+  mount.setAttribute('class', this.style)
+  this.root.render(mount.children[0], carets.truncate(offset), 0)
+}
+
+
+
+/**
+ * Represents an ordered set of Paragraphs.
+ */
+
+ParagraphTree = function(left, right) {
+  ParagraphTree.super_.call(this, left, right)
+
+  this.ele = 'pt'
+  this.style = 'ni-ele ni-ele-pt'
+}
+
+inherits(ParagraphTree, Branch)
+
+ParagraphTree.prototype.ins = function(pos, txt) {
+  if(this.inc(pos))
+    return new ParagraphTree(this.left.ins(pos, txt),
+      this.right.ins(pos - this.mid, txt))
+  else
+    return this
+}
+
+ParagraphTree.prototype.del = function(pos, len) {
+  if(pos < this.mid && pos + len > this.len)
+    return this.left.del(pos, len)
+  else if(pos < this.mid && pos + len >= this.mid)
+    return new ParagraphTree(this.left.del(pos, len),
+      this.right.del(pos - this.mid, len)).merge()
+  else if(this.sect(pos, len))
+    return new ParagraphTree(this.left.del(pos, len),
+      this.right.del(pos - this.mid, len))
+  else
+    return this
+}
+
+ParagraphTree.prototype.add = function(pos, len, fmt) {
+  if(this.sect(pos, len) || pos === 0)
+    return new ParagraphTree(this.left.add(pos, len, fmt),
+      this.right.add(pos - this.mid, len, fmt))
+  else
+    return this
+}
+
+ParagraphTree.prototype.sub = function(pos, len, fmt) {
+  if(this.sect(pos, len) || pos === 0)
+    return new ParagraphTree(this.left.sub(pos, len, fmt),
+      this.right.sub(pos - this.mid, len, fmt))
+  else
+    return this
+}
+
+ParagraphTree.prototype.split = function(pos) {
+  if(this.inc(pos))
+    return new ParagraphTree(this.left.split(pos),
+      this.right.split(pos - this.mid))
+  else
+    return this
+}
+
+
+
+/**
+ * An Editor consists of text content and editing carets.
+ */
+
+function Editor(content, carets) {
+  this.content = content || new Paragraph
+  this.carets = carets || new Caretless
+  this.mounts = []
+}
+
+Editor.prototype.ins = function(pos, txt) {
+  this.content = this.content.ins(pos, txt)
+  this.carets = this.carets.ins(pos, txt)
+  return this
+}
+
+Editor.prototype.del = function(pos, len) {
+  this.content = this.content.del(pos, len)
+  this.carets = this.carets.del(pos, len)
+  return this
+}
+
+Editor.prototype.add = function(pos, len, fmt) {
+  this.content = this.content.add(pos, len, fmt)
+  return this
+}
+
+Editor.prototype.sub = function(pos, len, fmt) {
+  this.content = this.content.sub(pos, len, fmt)
+  return this
+}
+
+Editor.prototype.split = function(pos) {
+  this.content = this.content.split(pos)
+  this.carets = this.carets.split(pos)
+  return this
+}
+
+Editor.prototype.mov = function(pos, uid) {
+  var orig = this.carets.find(0, uid)
+  this.content = orig === null ?
+    this.content.ins(pos, '') : this.content.ins(orig, '').ins(pos, '')
+  this.carets = this.carets.rem(uid).put(pos, uid)
+  return this
+}
+
+Editor.prototype.rem = function(uid) {
+  var orig = this.carets.find(0, uid)
+  this.content = orig === null ?
+    this.content : this.content.ins(orig, '')
+  this.carets = this.carets.rem(uid)
+  return this
+}
+
+Editor.prototype.mount = function(mountPoint) {
+  if(this.mounts.indexOf(mountPoint) < 0) {
+    if(mountPoint.tagName.toLowerCase() !== "div")
+      throw new Error("Must mount to a div.")
+    while(mountPoint.lastChild)
+      mountPoint.removeChild(mountPoint.lastChild)
+
+    mountPoint.appendChild(this.content.dom(this.carets, 0))
+    this.mounts.push(mountPoint)
   }
+  return this
+}
 
-  Text.prototype.serialize = function() {
-    return {
-      t: this.t,
-      format: {
-        b: this.bold.serialize(),
-        i: this.italic.serialize()
-      }
-    }
-  }
-
-  Text.unserialize = function(serialized) {
-    if(!serialized)
-      return new Text()
-    return new Text(serialized.t,
-      IntervalList.unserialize(serialized.format.b),
-      IntervalList.unserialize(serialized.format.i))
-  }
-
-
-
-
-  /**
-    Class: Editor
-    Controller managing DOM view & interactions with text model.
-   */
-
-  function Editor(ele, opt) {
-    console.log(opt.bold)
-    opt = opt ? opt : {}
-    var ele = ele
-    var text = new Text(opt.text || '',
-      IntervalList.unserialize(opt.bold),
-      IntervalList.unserialize(opt.italic))
-    var local = opt.local || true
-    var history = []
-
-    this.state = function() {
-      return {
-        ele: ele,
-        text: text
-      }
-    }
-
-    function setSel(start, end) {
-      var range = document.createRange()
-
-      var tw = document.createTreeWalker(ele, NodeFilter.SHOW_TEXT)
-      while(tw.nextNode() && start > tw.currentNode.length)
-        start -= tw.currentNode.length
-      range.setStart(tw.currentNode, start)
-
-      if(end) {
-        var tw = document.createTreeWalker(ele, NodeFilter.SHOW_TEXT)
-        while(tw.nextNode() && end > tw.currentNode.length)
-          end -= tw.currentNode.length
-        range.setEnd(tw.currentNode, end)
-      }
-
-      document.getSelection().removeAllRanges()
-      document.getSelection().addRange(range)
-    }
-
-    function getSel() {
-      var cur = window.getSelection().getRangeAt(0)
-      var range = document.createRange()
-
-      range.selectNodeContents(ele)
-      range.setEnd(cur.startContainer, cur.startOffset)
-      var start = Math.min(range.toString().length, text.length())
-      var end = Math.min(start + cur.toString().length, text.length())
-
-      return {
-        start: start,
-        end: end
-      }
-    }
-
-    function update(start, end) {
-      ele.innerHTML = text.toHTML()
-      setSel(start, end)
-    }
-
-    ele.addEventListener('keypress', function(e) {
-      if(key = e.which) {
-        e.preventDefault()
-        var sel = getSel()
-        text = text.del(sel.end - sel.start, sel.start).ins(
-          key !== 13 ? String.fromCharCode(key) : "\n",
-          sel.end)
-        update(sel.start + 1)
-      }
-    })
-
-    ele.addEventListener('keydown', function(e) {
-      var key = e.which
-      if(key === 8) {
-        e.preventDefault()
-        sel = getSel()
-        if(sel.start === sel.end && sel.start !== 0) {
-          text = text.del(1, sel.start - 1)
-          update(sel.start - 1)
-        } else {
-          text = text.del(sel.end - sel.start, sel.start)
-          update(sel.start)
-        }
-      } else if(e.metaKey && (key === 66 || key === 73 || key === 65)) {
-        e.preventDefault()
-        var sel = getSel()
-        switch(key) {
-          case 65:
-            sel.start = 0, sel.end = text.length()
-            break
-          case 66:
-            text = text.embolden(new Interval(sel.start, sel.end))
-            break
-          case 73:
-            text = text.italicize(new Interval(sel.start, sel.end))
-            break
-          default:
-            break
-        }
-        update(sel.start, sel.end)
-      }
-    })
-
-    ele.addEventListener('compositionend', function(e) {
-      e.preventDefault()
-      sel = getSel()
-      text = text.ins(e.data, sel.start)
-      update(sel.start + e.data.length)
-    })
-
-    ele.addEventListener('textInput', function(e) {
-      e.preventDefault()
-    })
-
-    update()
-  }
-
-
-
-  /**
-    Module exports
-   */
-
-  return Editor
-})
+Editor.prototype.render = function() {
+  var self = this
+  this.mounts.forEach(function(mount) {
+    self.content.render(mount.firstChild, self.carets, 0)
+  })
+  return this
+}

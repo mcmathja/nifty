@@ -1,0 +1,65 @@
+#editor {
+  font-family: Times;
+}
+
+.ni-b {
+  font-weight: bold;
+}
+
+.ni-i {
+  font-style: italic;
+}
+
+.ni-u {
+  text-decoration: underline;
+}
+
+.ni-l {
+  text-align: left;
+}
+
+.ni-c {
+  text-align: center;
+}
+
+.ni-r {
+  text-align: right;
+}
+
+.ni-ele {
+  margin: 0;
+  padding: 0;
+}
+
+.ni-ele-i {
+  display: inline;
+}
+
+.ni-ele-it {
+  display: inline;
+}
+
+.ni-ele-p {
+  display: block;
+  margin: 1em 0;
+}
+
+.ni-ele.pt {
+  display: block;
+}
+
+.ni-cursor {
+  display: inline-block;
+  position: absolute;
+  height: 16px;
+  padding-right: 2px;
+  margin-left: -1px;
+  background-color: rgba(255,0,0,1.0);
+  animation: blink 1s ease-in-out 0s infinite;
+}
+
+@keyframes blink {
+  0% { opacity: 1; }
+  50% { opacity: 0; }
+  100% { opacity: 1; }
+}
